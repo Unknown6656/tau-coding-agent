@@ -15,6 +15,10 @@ Everything else is passed through to pi verbatim.
 EOF
 )
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+_TAU_PREFIX="\x1b[90m[\x1b[96mtau\x1b[90m]\x1b[m "
+_TAU_ERR_PREFIX="${_TAU_PREFIX}\x1b[31merror:\x1b[91m "
+_TAU_WARN_PREFIX="${_TAU_PREFIX}\x1b[33mwarning:\x1b[93m "
+
 
 if ! command -v tau >/dev/null 2>&1; then
     BIN_DIR=""
@@ -38,18 +42,18 @@ if ! command -v tau >/dev/null 2>&1; then
     mkdir -p "$BIN_DIR"
     ln -sf "$SELF" "$BIN_DIR/tau"
 
-    echo "tau: linked $BIN_DIR/tau -> $SELF"
+    echo -e "${_TAU_PREFIX}linked $BIN_DIR/tau -> $SELF"
 
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
-        *) echo "tau: warning: $BIN_DIR is not in your PATH; add it to your shell rc" >&2 ;;
+        *) echo -e "${_TAU_WARN_PREFIX}$BIN_DIR is not in your PATH; add it to your shell rc" >&2 ;;
     esac
 fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -o|--offline)   OFFLINE=1;      shift ;;
-        -r|--read-only) READ_ONLY=1;    shift ;;
+        -o|--offline)   OFFLINE=1;   shift ;;
+        -r|--read-only) READ_ONLY=1; shift ;;
         -h|--help)
             echo "$USAGE_NOTE"
             exit 0 ;;
@@ -58,7 +62,17 @@ while [ $# -gt 0 ]; do
 done
 
 if ! { [ -t 0 ] && [ -t 1 ]; }; then
-    echo "tau: an interactive terminal (TTY) is required" >&2
+    echo -e "${_TAU_ERR_PREFIX}an interactive terminal (TTY) is required" >&2
+    exit 1
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo -e "${_TAU_ERR_PREFIX}docker is not installed or not in PATH" >&2
+    exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    echo -e "${_TAU_ERR_PREFIX}the docker daemon is not running or not accessible" >&2
     exit 1
 fi
 
@@ -103,9 +117,23 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     BUILD_CTX="$(mktemp -d)"
     trap 'rm -rf "$BUILD_CTX"' EXIT
     printf '%s\n' "$DOCKERFILE" > "$BUILD_CTX/Dockerfile"
-    docker build -t "$IMAGE" -f "$BUILD_CTX/Dockerfile" "$BUILD_CTX"
+    docker build \
+        -t "$IMAGE" \
+        -f "$BUILD_CTX/Dockerfile" \
+        "$BUILD_CTX"
 fi
 
+if ! docker run --rm --entrypoint sh "$IMAGE" -c 'command -v pi' >/dev/null 2>&1; then
+    echo -e "${_TAU_ERR_PREFIX}pi is not installed in image $IMAGE; remove it and re-run tau to rebuild" >&2
+    exit 1
+fi
+
+if [ ! -d "${HOME}/.pi" ]; then
+    echo -e "${_TAU_WARN_PREFIX}${HOME}/.pi does not exist; creating it" >&2
+    mkdir -p "${HOME}/.pi"
+fi
+
+echo -e "${_TAU_PREFIX}Starting Docker container '$IMAGE'..."
 docker run \
         --rm \
         -it \
