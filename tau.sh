@@ -14,6 +14,37 @@ Usage: tau [options] [pi args...]
 Everything else is passed through to pi verbatim.
 EOF
 )
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+
+if ! command -v tau >/dev/null 2>&1; then
+    BIN_DIR=""
+
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) BIN_DIR="$HOME/.local/bin" ;;
+        *)
+            IFS=':' read -r -a _path_dirs <<< "$PATH"
+
+            for _d in "${_path_dirs[@]}"; do
+                if [ -d "$_d" ] && [ -w "$_d" ]; then
+                    BIN_DIR="$_d";
+                    break;
+                fi
+            done
+
+            BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+        ;;
+    esac
+
+    mkdir -p "$BIN_DIR"
+    ln -sf "$SELF" "$BIN_DIR/tau"
+
+    echo "tau: linked $BIN_DIR/tau -> $SELF"
+
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) ;;
+        *) echo "tau: warning: $BIN_DIR is not in your PATH; add it to your shell rc" >&2 ;;
+    esac
+fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,11 +68,12 @@ DOCKER_SANDBOX=()
 
 SANDBOX_NOTE=$(cat <<EOF
 You are running inside a temporary Docker container, not directly on the host.
-- Your working directory "/workspace" is a bind mount of the host directory "${WORKDIR}".
+
+- Your working directory is the host directory "${WORKDIR}", mounted at the same path.
 - The host's "~/.pi" is mounted at "/home/pi/.pi" (pi's config and session state are shared with the host).
 - The container is ephemeral: it is removed (docker run --rm) when pi exits.
 - Network access: $( [ "$OFFLINE" = 1 ] && echo "DISABLED" || echo "available" ).
-- Container filesystem: $( [ "$READ_ONLY" = 1 ] && echo "READ-ONLY; only /workspace, /home/pi/.pi and /tmp are writable" || echo "writable, but writes outside the mounts are discarded" ).
+- Container filesystem: $( [ "$READ_ONLY" = 1 ] && echo "READ-ONLY; only ${WORKDIR}, /home/pi/.pi and /tmp are writable" || echo "writable, but writes outside the mounts are discarded" ).
 - Never assume host state (installed tools, services, environment variables) exists inside the container.
 - The docker CLI is available and talks to the HOST Docker daemon via a mounted socket.
 - Containers you start with docker/compose run on the host and persist after this container exits.
@@ -63,14 +95,15 @@ RUN apt-get update \
 
 RUN npm install -g @earendil-works/pi-coding-agent
 
-WORKDIR /workspace
-
 CMD ["pi"]
 EOF
 )
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    printf '%s\n' "$DOCKERFILE" | docker build -t "$IMAGE" -f -
+    BUILD_CTX="$(mktemp -d)"
+    trap 'rm -rf "$BUILD_CTX"' EXIT
+    printf '%s\n' "$DOCKERFILE" > "$BUILD_CTX/Dockerfile"
+    docker build -t "$IMAGE" -f "$BUILD_CTX/Dockerfile" "$BUILD_CTX"
 fi
 
 docker run \
@@ -78,9 +111,9 @@ docker run \
         -it \
         --user "$(id -u):$(id -g)" \
         --group-add "$(getent group docker | cut -d: -f3)" \
-        -w /workspace \
+        -w "$WORKDIR" \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -v "$WORKDIR:/workspace" \
+        -v "$WORKDIR:$WORKDIR" \
         -v "${HOME}/.pi:/home/pi/.pi" \
         -e HOME=/home/pi \
         "${DOCKER_SANDBOX[@]}" \
