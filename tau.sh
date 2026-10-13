@@ -3,11 +3,14 @@ set -euo pipefail
 
 IMAGE="tau:latest"
 WORKDIR="$PWD"
+REBUILD=0
 OFFLINE=0
 READ_ONLY=0
 PI_ARGS=()
 USAGE_NOTE=$(cat <<'EOF'
 Usage: tau [options] [pi args...]
+    -h, --help         Show this help message (all other arguments are ignored)
+    -b, --rebuild      Force rebuild of the Docker image (all other arguments are ignored)
     -o, --offline      Run the container with no network access
     -r, --read-only    Make the container filesystem read-only (writable: mounts + /tmp)
 
@@ -52,6 +55,7 @@ fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        -b|--rebuild)   REBUILD=1;   shift ;;
         -o|--offline)   OFFLINE=1;   shift ;;
         -r|--read-only) READ_ONLY=1; shift ;;
         -h|--help)
@@ -105,6 +109,7 @@ RUN apt-get update \
                 --no-install-recommends \
                 ca-certificates \
                 docker-cli \
+                git \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @earendil-works/pi-coding-agent
@@ -113,7 +118,7 @@ CMD ["pi"]
 EOF
 )
 
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+if [ "$REBUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     BUILD_CTX="$(mktemp -d)"
     trap 'rm -rf "$BUILD_CTX"' EXIT
     printf '%s\n' "$DOCKERFILE" > "$BUILD_CTX/Dockerfile"
