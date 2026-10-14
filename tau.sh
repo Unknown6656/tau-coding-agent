@@ -85,17 +85,18 @@ DOCKER_SANDBOX=()
 [ "$READ_ONLY" = 1 ] && DOCKER_SANDBOX+=(--read-only --tmpfs /tmp)
 
 SANDBOX_NOTE=$(cat <<EOF
-You are running inside a temporary Docker container, not directly on the host.
+You are running inside the temporary Docker container 'tau', not directly on the host.
 
 - Your working directory is the host directory "${WORKDIR}", mounted at the same path.
 - The host's "~/.pi" is mounted at "/home/pi/.pi" (pi's config and session state are shared with the host).
-- The container is ephemeral: it is removed (docker run --rm) when pi exits.
+- The 'tau' container is ephemeral: it is removed (docker run --rm) when pi exits.
 - Network access: $( [ "$OFFLINE" = 1 ] && echo "DISABLED" || echo "available" ).
 - Container filesystem: $( [ "$READ_ONLY" = 1 ] && echo "READ-ONLY; only ${WORKDIR}, /home/pi/.pi and /tmp are writable" || echo "writable, but writes outside the mounts are discarded" ).
 - Never assume host state (installed tools, services, environment variables) exists inside the container.
 - The docker CLI is available and talks to the HOST Docker daemon via a mounted socket.
 - Containers you start with docker/compose run on the host and persist after this container exits.
-- The Docker socket is effectively root-equivalent on the host; do not start privileged containers or mount host paths.
+- The Docker socket is effectively root-equivalent on the host; do not start privileged containers or mount host paths, unless explicitly allowed by the user after asking them.
+- Feel free to install additional tools (apt/python/npm/..., etc.). Keep in mind that changes to the container are ephemeral and will be lost when it exits.
 EOF
 )
 DOCKERFILE=$(cat <<'EOF'
@@ -110,6 +111,15 @@ RUN apt-get update \
                 ca-certificates \
                 docker-cli \
                 git \
+                curl \
+                python3 \
+                unzip \
+                perl \
+                tar \
+                binutils \
+                make \
+                gcc \
+                g++ \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @earendil-works/pi-coding-agent
