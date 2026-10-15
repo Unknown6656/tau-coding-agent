@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="tau:latest"
+_TAU_PREFIX="\x1b[90m[\x1b[96mtau\x1b[90m]\x1b[m "
+_TAU_ERR_PREFIX="${_TAU_PREFIX}\x1b[31merror:\x1b[91m "
+_TAU_WARN_PREFIX="${_TAU_PREFIX}\x1b[33mwarning:\x1b[93m "
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+IMAGE="tau:$(sha256sum "$SELF" | cut -c1-12)"
 WORKDIR="$PWD"
 REBUILD=0
 OFFLINE=0
-READ_ONLY=0
 PI_ARGS=()
+DOCKER_SANDBOX_ARGS=()
+CLEANUP_DIRS=()
+
 USAGE_NOTE=$(cat <<'EOF'
 Usage: tau [options] [pi args...]
     -h, --help         Show this help message (all other arguments are ignored)
-    -b, --rebuild      Force rebuild of the Docker image (all other arguments are ignored)
-    -o, --offline      Run the container with no network access
-    -r, --read-only    Make the container filesystem read-only (writable: mounts + /tmp)
+    -b, --rebuild      Force rebuild of the Docker image.
+    -o, --offline      Run the container with no network access.
 
 Everything else is passed through to pi verbatim.
 EOF
 )
-SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-_TAU_PREFIX="\x1b[90m[\x1b[96mtau\x1b[90m]\x1b[m "
-_TAU_ERR_PREFIX="${_TAU_PREFIX}\x1b[31merror:\x1b[91m "
-_TAU_WARN_PREFIX="${_TAU_PREFIX}\x1b[33mwarning:\x1b[93m "
 
 
 if ! command -v tau >/dev/null 2>&1; then
@@ -55,9 +57,8 @@ fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -b|--rebuild)   REBUILD=1;   shift ;;
-        -o|--offline)   OFFLINE=1;   shift ;;
-        -r|--read-only) READ_ONLY=1; shift ;;
+        -b|--rebuild) REBUILD=1; shift ;;
+        -o|--offline) OFFLINE=1; shift ;;
         -h|--help)
             echo "$USAGE_NOTE"
             exit 0 ;;
@@ -80,9 +81,10 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-DOCKER_SANDBOX=()
-[ "$OFFLINE" = 1 ] && DOCKER_SANDBOX+=(--network none)
-[ "$READ_ONLY" = 1 ] && DOCKER_SANDBOX+=(--read-only --tmpfs /tmp)
+[ "$OFFLINE" = 1 ] && DOCKER_SANDBOX_ARGS+=(--network none)
+
+cleanup() { rm -rf "${CLEANUP_DIRS[@]}"; }
+trap cleanup EXIT
 
 SANDBOX_NOTE=$(cat <<EOF
 You are running inside the temporary Docker container 'tau', not directly on the host.
@@ -91,12 +93,12 @@ You are running inside the temporary Docker container 'tau', not directly on the
 - The host's "~/.pi" is mounted at "/home/pi/.pi" (pi's config and session state are shared with the host).
 - The 'tau' container is ephemeral: it is removed (docker run --rm) when pi exits.
 - Network access: $( [ "$OFFLINE" = 1 ] && echo "DISABLED" || echo "available" ).
-- Container filesystem: $( [ "$READ_ONLY" = 1 ] && echo "READ-ONLY; only ${WORKDIR}, /home/pi/.pi and /tmp are writable" || echo "writable, but writes outside the mounts are discarded" ).
+- Container filesystem: writable, but writes outside the mounts are discarded.
 - Never assume host state (installed tools, services, environment variables) exists inside the container.
 - The docker CLI is available and talks to the HOST Docker daemon via a mounted socket.
 - Containers you start with docker/compose run on the host and persist after this container exits.
 - The Docker socket is effectively root-equivalent on the host; do not start privileged containers or mount host paths, unless explicitly allowed by the user after asking them.
-- Feel free to install additional tools (apt/python/npm/..., etc.). Keep in mind that changes to the container are ephemeral and will be lost when it exits.
+- sudo is available (passwordless) for system-level installs, e.g. 'sudo apt install ...'. Keep in mind that changes to the container are ephemeral and will be lost when it exits.
 EOF
 )
 DOCKERFILE=$(cat <<'EOF'
@@ -105,21 +107,20 @@ FROM node:26-slim
 ENV PATH="/usr/local/lib/node_modules/.bin:$PATH"
 
 RUN apt-get update \
- && apt-get install \
-                -y \
-                --no-install-recommends \
-                ca-certificates \
-                docker-cli \
-                git \
-                curl \
-                python3 \
-                unzip \
-                perl \
-                tar \
-                binutils \
-                make \
-                gcc \
-                g++ \
+ && apt-get install -y --no-install-recommends \
+                    ca-certificates \
+                    docker-cli \
+                    git \
+                    curl \
+                    python3 \
+                    unzip \
+                    perl \
+                    tar \
+                    binutils \
+                    make \
+                    sudo \
+                    gcc \
+                    g++ \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @earendil-works/pi-coding-agent
@@ -130,12 +131,13 @@ EOF
 
 if [ "$REBUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     BUILD_CTX="$(mktemp -d)"
-    trap 'rm -rf "$BUILD_CTX"' EXIT
+    CLEANUP_DIRS+=("$BUILD_CTX")
+
     printf '%s\n' "$DOCKERFILE" > "$BUILD_CTX/Dockerfile"
     docker build \
-        -t "$IMAGE" \
-        -f "$BUILD_CTX/Dockerfile" \
-        "$BUILD_CTX"
+            -t "$IMAGE" \
+            -f "$BUILD_CTX/Dockerfile" \
+            "$BUILD_CTX"
 fi
 
 if ! docker run --rm --entrypoint sh "$IMAGE" -c 'command -v pi' >/dev/null 2>&1; then
@@ -148,6 +150,20 @@ if [ ! -d "${HOME}/.pi" ]; then
     mkdir -p "${HOME}/.pi"
 fi
 
+SUDOERS_DIR="$(mktemp -d)"
+CLEANUP_DIRS+=("$SUDOERS_DIR")
+
+echo -e "${_TAU_PREFIX}Patching sudo for user '$(id -u):$(id -g)' ..."
+
+docker run --rm --user root -v "$SUDOERS_DIR:/fix" -e TAU_UID="$(id -u)" "$IMAGE" sh -c '
+    {
+        echo "$TAU_UID ALL=(ALL) NOPASSWD:ALL"
+        name="$(getent passwd "$TAU_UID" | cut -d: -f1)"
+        [ -n "$name" ] && echo "$name ALL=(ALL) NOPASSWD:ALL"
+    } > /fix/tau
+    chmod 0440 /fix/tau
+'
+
 echo -e "${_TAU_PREFIX}Starting Docker container '$IMAGE'..."
 docker run \
         --rm \
@@ -156,9 +172,10 @@ docker run \
         --group-add "$(getent group docker | cut -d: -f3)" \
         -w "$WORKDIR" \
         -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$SUDOERS_DIR/tau:/etc/sudoers.d/tau:ro" \
         -v "$WORKDIR:$WORKDIR" \
         -v "${HOME}/.pi:/home/pi/.pi" \
         -e HOME=/home/pi \
-        "${DOCKER_SANDBOX[@]}" \
+        "${DOCKER_SANDBOX_ARGS[@]}" \
         "$IMAGE" \
         pi --append-system-prompt "$SANDBOX_NOTE" "${PI_ARGS[@]}"
