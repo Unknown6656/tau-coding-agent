@@ -6,7 +6,8 @@ _TAU_ERR_PREFIX="${_TAU_PREFIX}\x1b[31merror:\x1b[91m "
 _TAU_WARN_PREFIX="${_TAU_PREFIX}\x1b[33mwarning:\x1b[93m "
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-IMAGE="tau:$(sha256sum "$SELF" | cut -c1-12)"
+IMAGE_BASE_NAME="tau"
+IMAGE="$IMAGE_BASE_NAME:$(sha256sum "$SELF" | cut -c1-12)"
 WORKDIR="$PWD"
 REBUILD=0
 OFFLINE=0
@@ -26,6 +27,15 @@ Everything else is passed through to pi verbatim.
 EOF
 )
 
+echo -e "\x1b[m"
+echo -e "\x1b[38;2;215;135;135m▄▄▄▄▄▄▄"
+echo -e "\x1b[38;2;215;135;135m   █    \x1b[38;2;95;135;175m ▄▄▄   \x1b[38;2;215;175;95m▄   ▄"
+echo -e "\x1b[38;2;215;135;135m   █    \x1b[38;2;95;135;175m▀   █  \x1b[38;2;215;175;95m█   █"
+echo -e "\x1b[38;2;215;135;135m   █    \x1b[38;2;95;135;175m▄▀▀▀█  \x1b[38;2;215;175;95m█   █"
+echo -e "\x1b[38;2;215;135;135m   █    \x1b[38;2;95;135;175m▀▄▄▀█  \x1b[38;2;215;175;95m▀▄▄▀█"
+echo -e "\x1b[38;5;107mThe dockerized pi coding agent environment"
+echo -e "\x1b[38;5;247m               by \x1b[1;97mUnknown6656"
+echo -e "\x1b[m"
 
 if ! command -v tau >/dev/null 2>&1; then
     echo -e "${_TAU_PREFIX}tau not found in PATH, attempting to link it to a writable directory..."
@@ -159,6 +169,8 @@ if [ "$UNSUPERVISED" = 0 ]; then
     SANDBOX_NOTE+="
 - Do NOT run 'rm -rf': the harness aborts the operation instantly if the command contains this string. Remove files with targeted 'rm' (without -r -f), 'find ... -delete', or similar non-recursive alternatives.
 "
+else
+    echo -e "${_TAU_WARN_PREFIX}Running tau in unsupervised mode. Bash commands will NOT require user confirmation."
 fi
 
 DOCKERFILE=$(cat <<EOF
@@ -186,10 +198,27 @@ if [ "$REBUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
             -t "$IMAGE" \
             -f "$BUILD_CTX/Dockerfile" \
             "$BUILD_CTX"
+    EXIT_CODE=$?
+
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo -e "${_TAU_ERR_PREFIX}Failed to build the Docker image '$IMAGE' with exit code $EXIT_CODE." >&2
+        exit 1
+    fi
+
+    echo -e "${_TAU_PREFIX}Finished building Docker image '$IMAGE'."
+
+    OLD_TAU_IMAGES=$(docker images --format '{{.Repository}}:{{.Tag}}' \
+                    | grep '^'"$IMAGE_BASE_NAME"':' \
+                    | grep -vxF "$IMAGE" || true)
+
+    if [ -n "$OLD_TAU_IMAGES" ]; then
+        echo -e "${_TAU_PREFIX}Removing old tau images: $(echo "$OLD_TAU_IMAGES" | tr '\n' ' ')"
+        echo "$OLD_TAU_IMAGES" | xargs -r docker image rm -f
+    fi
 fi
 
 if ! docker run --rm --entrypoint sh "$IMAGE" -c 'command -v pi' >/dev/null 2>&1; then
-    echo -e "${_TAU_ERR_PREFIX}pi is not installed in image $IMAGE; remove it and re-run tau to rebuild" >&2
+    echo -e "${_TAU_ERR_PREFIX}pi is not installed in image $IMAGE. Remove the docker image and re-run tau to rebuild" >&2
     exit 1
 fi
 
@@ -208,9 +237,10 @@ SETTINGS_SRC_ARGS=()
 SUDOERS_DIR="$(mktemp -d)"
 CLEANUP_DIRS+=("$SUDOERS_DIR")
 
-echo -e "${_TAU_PREFIX}Patching sudo for user '$(id -u):$(id -g)' ..."
-
-docker run --rm --user root \
+echo -e "${_TAU_PREFIX}Running the sudo patch for user '$(id -u):$(id -g)', as well as settings patch ..."
+docker run \
+        --rm \
+        --user root \
         -v "$SUDOERS_DIR:/fix" \
         -v "$SETTINGS_DIR:/settings" \
         "${SETTINGS_SRC_ARGS[@]}" \
@@ -242,6 +272,11 @@ docker run --rm --user root \
             fi
 '
 
+if [ $? -ne 0 ]; then
+    echo -e "${_TAU_ERR_PREFIX}Failed to run the sudo and settings patch" >&2
+    exit 1
+fi
+
 echo -e "${_TAU_PREFIX}Starting Docker container '$IMAGE'..."
 docker run \
         --rm \
@@ -262,3 +297,10 @@ docker run \
         "${DOCKER_SANDBOX_ARGS[@]}" \
         "$IMAGE" \
         pi --append-system-prompt "$SANDBOX_NOTE" "${PI_ARGS[@]}"
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo -e "${_TAU_WARN_PREFIX}Docker container '$IMAGE' exited with the non-zero code $EXIT_CODE"
+else
+    echo -e "${_TAU_PREFIX}Docker container '$IMAGE' has exited."
+fi
