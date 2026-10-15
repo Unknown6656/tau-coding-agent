@@ -10,15 +10,17 @@ IMAGE="tau:$(sha256sum "$SELF" | cut -c1-12)"
 WORKDIR="$PWD"
 REBUILD=0
 OFFLINE=0
+UNSUPERVISED=0
 PI_ARGS=()
 DOCKER_SANDBOX_ARGS=()
 CLEANUP_DIRS=()
 
 USAGE_NOTE=$(cat <<EOF
 Usage: tau [options] [pi args...]
-    -h, --help         Show this help message (all other arguments are ignored)
-    -b, --rebuild      Force rebuild of the Docker image.
-    -o, --offline      Run the container with no network access.
+    -h, --help            Show this help message (all other arguments are ignored)
+    -b, --rebuild         Force rebuild of the tau Docker image.
+    -o, --offline         Run the tau container with no network access.
+    -u, --unsupervised    Run pi in unsupervised mode (disables the 'bashConfirm' extension for this container)
 
 Everything else is passed through to pi verbatim.
 EOF
@@ -26,6 +28,7 @@ EOF
 
 
 if ! command -v tau >/dev/null 2>&1; then
+    echo -e "${_TAU_PREFIX}tau not found in PATH, attempting to link it to a writable directory..."
     BIN_DIR=""
 
     case ":$PATH:" in
@@ -59,6 +62,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -b|--rebuild) REBUILD=1; shift ;;
         -o|--offline) OFFLINE=1; shift ;;
+        -u|--unsupervised) UNSUPERVISED=1; shift ;;
         -h|--help)
             echo "$USAGE_NOTE"
             exit 0 ;;
@@ -85,6 +89,7 @@ fi
 
 function cleanup() {
     rm -rf "${CLEANUP_DIRS[@]}";
+    echo -e "${_TAU_PREFIX}cleanup complete."
 }
 trap cleanup EXIT
 
@@ -136,20 +141,26 @@ You are the pi coding agent, started by the 'tau' wrapper script inside a tempor
 
 - Your working directory is the host directory "${WORKDIR}", mounted at the same path.
 - The host's "~/.pi" is mounted at "/home/pi/.pi" (pi's config and session state are shared with the host).
-- The container is ephemeral: it is removed (docker run --rm) when pi exits.
+- The tau container is ephemeral: it is removed (docker run --rm) when pi exits.
 - Network access: $( [ "$OFFLINE" = 1 ] && echo "DISABLED" || echo "available" ).
-- Container filesystem: writable, but writes outside the mounts are discarded.
-- Never assume host state (installed tools, services, environment variables) exists inside the container.
+- Tau container filesystem: writable, but writes outside the mounts are discarded.
+- Never assume host state (installed tools, services, environment variables) exists inside the tau container.
 - The docker CLI is available and talks to the HOST Docker daemon via a mounted socket.
-- Containers you start with docker/compose run on the host and persist after this container exits.
+- Containers you start with docker/compose run on the host and persist after this container exits. Be especially careful with volumes and mounts, as changes there affect the host directly.
 - The Docker socket is effectively root-equivalent on the host; do not start privileged containers or mount host paths, unless explicitly allowed by the user after asking them.
 - Preinstalled packages: ${APT_PACKAGES[*]}.
 - chromium is available for headless web testing: 'chromium --headless --no-sandbox --disable-gpu ...'. Pass --user-data-dir=/home/pi/chromium to keep its profile across container restarts.
 - sudo is available (passwordless) for system-level installs, e.g. 'sudo apt install ...'. Keep in mind that changes to the container are ephemeral and will be lost when it exits.
 - The following paths are Docker named volumes on the host and persist across container runs (list them with 'docker volume ls'): /home/pi/chromium (chromium profile), /home/pi/.cache (pip/npm caches), /var/cache/apt (apt archives). Everything else on the container filesystem is lost when it exits.
-- Do NOT run 'rm -rf': the harness aborts the operation instantly if the command contains this string. Remove files with targeted 'rm' (without -r -f), 'find ... -delete', or similar non-recursive alternatives.
 EOF
 )
+
+if [ "$UNSUPERVISED" = 0 ]; then
+    SANDBOX_NOTE+="
+- Do NOT run 'rm -rf': the harness aborts the operation instantly if the command contains this string. Remove files with targeted 'rm' (without -r -f), 'find ... -delete', or similar non-recursive alternatives.
+"
+fi
+
 DOCKERFILE=$(cat <<EOF
 FROM node:26-slim
 
@@ -187,6 +198,13 @@ if [ ! -d "${HOME}/.pi" ]; then
     mkdir -p "${HOME}/.pi"
 fi
 
+SETTINGS_DIR="$(mktemp -d)"
+CLEANUP_DIRS+=("$SETTINGS_DIR")
+
+SETTINGS_SRC_ARGS=()
+[ -f "${HOME}/.pi/agent/settings.json" ] && \
+    SETTINGS_SRC_ARGS+=(-v "${HOME}/.pi/agent/settings.json:/src-settings.json:ro")
+
 SUDOERS_DIR="$(mktemp -d)"
 CLEANUP_DIRS+=("$SUDOERS_DIR")
 
@@ -194,17 +212,34 @@ echo -e "${_TAU_PREFIX}Patching sudo for user '$(id -u):$(id -g)' ..."
 
 docker run --rm --user root \
         -v "$SUDOERS_DIR:/fix" \
+        -v "$SETTINGS_DIR:/settings" \
+        "${SETTINGS_SRC_ARGS[@]}" \
         -v "$VOL_CACHE:/v/cache" \
         -v "$VOL_CHROMIUM:/v/chromium" \
         -v "$VOL_APT:/v/apt" \
-        -e TAU_UID="$(id -u)" -e TAU_GID="$(id -g)" "$IMAGE" sh -c '
-    chown "$TAU_UID:$TAU_GID" /v/cache /v/chromium
-    {
-        echo "$TAU_UID ALL=(ALL) NOPASSWD:ALL"
-        name="$(getent passwd "$TAU_UID" | cut -d: -f1)"
-        [ -n "$name" ] && echo "$name ALL=(ALL) NOPASSWD:ALL"
-    } > /fix/tau
-    chmod 0440 /fix/tau
+        -e TAU_UID="$(id -u)" \
+        -e TAU_GID="$(id -g)" \
+        -e TAU_UNSUPERVISED="$UNSUPERVISED" \
+        "$IMAGE" \
+        sh -c '
+            chown "$TAU_UID:$TAU_GID" /v/cache /v/chromium
+            {
+                echo "$TAU_UID ALL=(ALL) NOPASSWD:ALL"
+                name="$(getent passwd "$TAU_UID" | cut -d: -f1)"
+                [ -n "$name" ] && echo "$name ALL=(ALL) NOPASSWD:ALL"
+            } > /fix/tau
+
+            chmod 0440 /fix/tau
+
+            if [ "$TAU_UNSUPERVISED" = "1" ]; then e=false; else e=true; fi
+
+            if [ -f /src-settings.json ]; then
+                jq --argjson e "$e" --arg pkg \"npm:pi-bash-confirm\" \
+                   "((.packages // []) as \$p | .packages = (if (\$p | index(\$pkg)) then \$p else (\$p + [\$pkg]) end) | .bashConfirm.enabled = \$e)" \
+                   /src-settings.json > /settings/settings.json
+            else
+                printf "{\n  \"packages\": [\"npm:pi-bash-confirm\"],\n  \"bashConfirm\": {\n    \"enabled\": %s\n  }\n}\n" "$e" > /settings/settings.json
+            fi
 '
 
 echo -e "${_TAU_PREFIX}Starting Docker container '$IMAGE'..."
@@ -218,6 +253,7 @@ docker run \
         -v "$SUDOERS_DIR/tau:/etc/sudoers.d/tau:ro" \
         -v "$WORKDIR:$WORKDIR" \
         -v "${HOME}/.pi:/home/pi/.pi" \
+        -v "$SETTINGS_DIR/settings.json:/home/pi/.pi/agent/settings.json" \
         -v "$VOL_CACHE:/home/pi/.cache" \
         -v "$VOL_CHROMIUM:/home/pi/chromium" \
         -v "$VOL_APT:/var/cache/apt" \
