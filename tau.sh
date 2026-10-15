@@ -14,7 +14,7 @@ PI_ARGS=()
 DOCKER_SANDBOX_ARGS=()
 CLEANUP_DIRS=()
 
-USAGE_NOTE=$(cat <<'EOF'
+USAGE_NOTE=$(cat <<EOF
 Usage: tau [options] [pi args...]
     -h, --help         Show this help message (all other arguments are ignored)
     -b, --rebuild      Force rebuild of the Docker image.
@@ -86,41 +86,76 @@ fi
 cleanup() { rm -rf "${CLEANUP_DIRS[@]}"; }
 trap cleanup EXIT
 
+APT_PACKAGES=(
+    ca-certificates
+    docker-cli
+    git
+    curl
+    python3
+    unzip
+    perl
+    tar
+    binutils
+    make
+    sudo
+    gcc
+    g++
+    cmake
+    gdb
+    pkg-config
+    libssl-dev
+    python3-pip
+    python3-venv
+    python3-dev
+    ripgrep
+    fd-find
+    jq
+    file
+    tree
+    less
+    procps
+    lsof
+    netcat-openbsd
+    iproute2
+    rsync
+    zip
+    patch
+    diffutils
+    openssh-client
+    chromium
+)
+
+# persistent named volumes (auto-created by docker on first use)
+VOL_CACHE="tau-cache"        # pip / npm / chromium caches -> /home/pi/.cache
+VOL_CHROMIUM="tau-chromium"  # chromium profile data  -> /home/pi/chromium
+VOL_APT="tau-apt-cache"      # apt package archives   -> /var/cache/apt
+
 SANDBOX_NOTE=$(cat <<EOF
-You are running inside the temporary Docker container 'tau', not directly on the host.
+You are the pi coding agent, started by the 'tau' wrapper script inside a temporary Docker container, not directly on the host.
 
 - Your working directory is the host directory "${WORKDIR}", mounted at the same path.
 - The host's "~/.pi" is mounted at "/home/pi/.pi" (pi's config and session state are shared with the host).
-- The 'tau' container is ephemeral: it is removed (docker run --rm) when pi exits.
+- The container is ephemeral: it is removed (docker run --rm) when pi exits.
 - Network access: $( [ "$OFFLINE" = 1 ] && echo "DISABLED" || echo "available" ).
 - Container filesystem: writable, but writes outside the mounts are discarded.
 - Never assume host state (installed tools, services, environment variables) exists inside the container.
 - The docker CLI is available and talks to the HOST Docker daemon via a mounted socket.
 - Containers you start with docker/compose run on the host and persist after this container exits.
 - The Docker socket is effectively root-equivalent on the host; do not start privileged containers or mount host paths, unless explicitly allowed by the user after asking them.
+- Preinstalled packages: ${APT_PACKAGES[*]}.
+- chromium is available for headless web testing: 'chromium --headless --no-sandbox --disable-gpu ...'. Pass --user-data-dir=/home/pi/chromium to keep its profile across container restarts.
 - sudo is available (passwordless) for system-level installs, e.g. 'sudo apt install ...'. Keep in mind that changes to the container are ephemeral and will be lost when it exits.
+- The following paths are Docker named volumes on the host and persist across container runs (list them with 'docker volume ls'): /home/pi/chromium (chromium profile), /home/pi/.cache (pip/npm caches), /var/cache/apt (apt archives). Everything else on the container filesystem is lost when it exits.
+- Do NOT run 'rm -rf': the harness aborts the operation instantly if the command contains this string. Remove files with targeted 'rm' (without -r -f), 'find ... -delete', or similar non-recursive alternatives.
 EOF
 )
-DOCKERFILE=$(cat <<'EOF'
+DOCKERFILE=$(cat <<EOF
 FROM node:26-slim
 
-ENV PATH="/usr/local/lib/node_modules/.bin:$PATH"
+ENV PATH="/usr/local/lib/node_modules/.bin:\$PATH"
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-                    ca-certificates \
-                    docker-cli \
-                    git \
-                    curl \
-                    python3 \
-                    unzip \
-                    perl \
-                    tar \
-                    binutils \
-                    make \
-                    sudo \
-                    gcc \
-                    g++ \
+ && apt-get install -y --no-install-recommends ${APT_PACKAGES[*]} \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @earendil-works/pi-coding-agent
@@ -130,6 +165,8 @@ EOF
 )
 
 if [ "$REBUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo -e "${_TAU_PREFIX}Building Docker image '$IMAGE'..."
+
     BUILD_CTX="$(mktemp -d)"
     CLEANUP_DIRS+=("$BUILD_CTX")
 
@@ -155,7 +192,13 @@ CLEANUP_DIRS+=("$SUDOERS_DIR")
 
 echo -e "${_TAU_PREFIX}Patching sudo for user '$(id -u):$(id -g)' ..."
 
-docker run --rm --user root -v "$SUDOERS_DIR:/fix" -e TAU_UID="$(id -u)" "$IMAGE" sh -c '
+docker run --rm --user root \
+        -v "$SUDOERS_DIR:/fix" \
+        -v "$VOL_CACHE:/v/cache" \
+        -v "$VOL_CHROMIUM:/v/chromium" \
+        -v "$VOL_APT:/v/apt" \
+        -e TAU_UID="$(id -u)" -e TAU_GID="$(id -g)" "$IMAGE" sh -c '
+    chown "$TAU_UID:$TAU_GID" /v/cache /v/chromium
     {
         echo "$TAU_UID ALL=(ALL) NOPASSWD:ALL"
         name="$(getent passwd "$TAU_UID" | cut -d: -f1)"
@@ -175,7 +218,11 @@ docker run \
         -v "$SUDOERS_DIR/tau:/etc/sudoers.d/tau:ro" \
         -v "$WORKDIR:$WORKDIR" \
         -v "${HOME}/.pi:/home/pi/.pi" \
+        -v "$VOL_CACHE:/home/pi/.cache" \
+        -v "$VOL_CHROMIUM:/home/pi/chromium" \
+        -v "$VOL_APT:/var/cache/apt" \
         -e HOME=/home/pi \
+        -e npm_config_cache=/home/pi/.cache/npm \
         "${DOCKER_SANDBOX_ARGS[@]}" \
         "$IMAGE" \
         pi --append-system-prompt "$SANDBOX_NOTE" "${PI_ARGS[@]}"
