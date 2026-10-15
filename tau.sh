@@ -83,52 +83,53 @@ fi
 
 [ "$OFFLINE" = 1 ] && DOCKER_SANDBOX_ARGS+=(--network none)
 
-cleanup() { rm -rf "${CLEANUP_DIRS[@]}"; }
+function cleanup() {
+    rm -rf "${CLEANUP_DIRS[@]}";
+}
 trap cleanup EXIT
 
 APT_PACKAGES=(
-    ca-certificates
-    docker-cli
-    git
-    curl
-    python3
-    unzip
-    perl
-    tar
     binutils
-    make
-    sudo
-    gcc
-    g++
+    ca-certificates
+    chromium
     cmake
+    curl
+    diffutils
+    docker-cli
+    fd-find
+    file
+    g++
+    gcc
     gdb
-    pkg-config
+    git
+    iproute2
+    jq
+    less
     libssl-dev
+    lsof
+    make
+    netcat-openbsd
+    openssh-client
+    patch
+    perl
+    pkg-config
+    procps
+    python3
+    python3-dev
     python3-pip
     python3-venv
-    python3-dev
     ripgrep
-    fd-find
-    jq
-    file
-    tree
-    less
-    procps
-    lsof
-    netcat-openbsd
-    iproute2
     rsync
+    sudo
+    tar
+    tree
+    unzip
     zip
-    patch
-    diffutils
-    openssh-client
-    chromium
 )
 
-# persistent named volumes (auto-created by docker on first use)
-VOL_CACHE="tau-cache"        # pip / npm / chromium caches -> /home/pi/.cache
-VOL_CHROMIUM="tau-chromium"  # chromium profile data  -> /home/pi/chromium
-VOL_APT="tau-apt-cache"      # apt package archives   -> /var/cache/apt
+VOL_CACHE="tau-cache"        # volume for pip / npm / chromium caches -> /home/pi/.cache
+VOL_CHROMIUM="tau-chromium"  # volume for chromium profile data  -> /home/pi/chromium
+VOL_APT="tau-apt-cache"      # volume for apt package archives   -> /var/cache/apt
 
 SANDBOX_NOTE=$(cat <<EOF
 You are the pi coding agent, started by the 'tau' wrapper script inside a temporary Docker container, not directly on the host.
@@ -155,8 +156,7 @@ FROM node:26-slim
 ENV PATH="/usr/local/lib/node_modules/.bin:\$PATH"
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ${APT_PACKAGES[*]} \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends ${APT_PACKAGES[*]}
 
 RUN npm install -g @earendil-works/pi-coding-agent
 
