@@ -10,17 +10,14 @@ IMAGE_BASE_NAME="tau"
 IMAGE="$IMAGE_BASE_NAME:$(sha256sum "$SELF" | cut -c1-12)"
 WORKDIR="$PWD"
 REBUILD=0
-OFFLINE=0
 UNSUPERVISED=0
 PI_ARGS=()
-DOCKER_SANDBOX_ARGS=()
 CLEANUP_DIRS=()
 
 USAGE_NOTE=$(cat <<EOF
 Usage: tau [options] [pi args...]
     -h, --help            Show this help message (all other arguments are ignored)
     -b, --rebuild         Force rebuild of the tau Docker image.
-    -o, --offline         Run the tau container with no network access.
     -u, --unsupervised    Run pi in unsupervised mode (disables the 'bashConfirm' extension for this container)
 
 Everything else is passed through to pi verbatim.
@@ -71,7 +68,6 @@ fi
 while [ $# -gt 0 ]; do
     case "$1" in
         -b|--rebuild) REBUILD=1; shift ;;
-        -o|--offline) OFFLINE=1; shift ;;
         -u|--unsupervised) UNSUPERVISED=1; shift ;;
         -h|--help)
             echo "$USAGE_NOTE"
@@ -94,8 +90,6 @@ if ! docker info >/dev/null 2>&1; then
     echo -e "${_TAU_ERR_PREFIX}the docker daemon is not running or not accessible" >&2
     exit 1
 fi
-
-[ "$OFFLINE" = 1 ] && DOCKER_SANDBOX_ARGS+=(--network none)
 
 function cleanup() {
     rm -rf "${CLEANUP_DIRS[@]}";
@@ -128,6 +122,7 @@ APT_PACKAGES=(
     patch
     perl
     pkg-config
+    powershell
     procps
     python3
     python3-dev
@@ -152,16 +147,27 @@ You are the pi coding agent, started by the 'tau' wrapper script inside a tempor
 - Your working directory is the host directory "${WORKDIR}", mounted at the same path.
 - The host's "~/.pi" is mounted at "/home/pi/.pi" (pi's config and session state are shared with the host).
 - The tau container is ephemeral: it is removed (docker run --rm) when pi exits.
-- Network access: $( [ "$OFFLINE" = 1 ] && echo "DISABLED" || echo "available" ).
 - Tau container filesystem: writable, but writes outside the mounts are discarded.
 - Never assume host state (installed tools, services, environment variables) exists inside the tau container.
 - The docker CLI is available and talks to the HOST Docker daemon via a mounted socket.
 - Containers you start with docker/compose run on the host and persist after this container exits. Be especially careful with volumes and mounts, as changes there affect the host directly.
 - The Docker socket is effectively root-equivalent on the host; do not start privileged containers or mount host paths, unless explicitly allowed by the user after asking them.
-- Preinstalled packages: ${APT_PACKAGES[*]}.
+- Preinstalled packages: ${APT_PACKAGES[*]} (in addition to default packages in the base image).
 - chromium is available for headless web testing: 'chromium --headless --no-sandbox --disable-gpu ...'. Pass --user-data-dir=/home/pi/chromium to keep its profile across container restarts.
 - sudo is available (passwordless) for system-level installs, e.g. 'sudo apt install ...'. Keep in mind that changes to the container are ephemeral and will be lost when it exits.
 - The following paths are Docker named volumes on the host and persist across container runs (list them with 'docker volume ls'): /home/pi/chromium (chromium profile), /home/pi/.cache (pip/npm caches), /var/cache/apt (apt archives). Everything else on the container filesystem is lost when it exits.
+
+# Very Important: Web Search Guidance
+
+**USE THE COMMAND LINE TOOL `ketch` (OR THE PI 'ketch' EXTENSION, available using `skill:ketch` and `ketch_search` tool call) FOR WEB SEARCH PURPOSES.**
+**ALWAYS PREFER WEBSEARCHES OVER RECALLING KNOWLEDGE FROM MEMORY.**
+**USE WEBSEARCH WHEN IN RISK OF OVERCOMPLICATION, UNCERTAINTY, LACK OF INFORMATION, AMBIGUITY, RECONSIDERATION, OR DOUBT.**
+**ALSO, USE WEBSEARCHES TO CONFIRM FACTS AND GATHER UP-TO-DATE INFORMATION.**
+
+If you think you know the answer without a web search, still perform a web search to confirm and gather up-to-date information.
+
+ALWAYS INCLUDE THIS SECTION ABOUT WEB SEARCHES USING 'ketch' IN YOUR WORKFLOWS AND COMPACTIONS.
+THIS IS A CRITICAL PIECE OF INFORMATION.
 EOF
 )
 
@@ -182,6 +188,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ${APT_PACKAGES[*]}
 
 RUN npm install -g @earendil-works/pi-coding-agent
+
+RUN curl -fsSL https://ketch.run/install | sh
 
 CMD ["pi"]
 EOF
@@ -294,7 +302,6 @@ docker run \
         -v "$VOL_APT:/var/cache/apt" \
         -e HOME=/home/pi \
         -e npm_config_cache=/home/pi/.cache/npm \
-        "${DOCKER_SANDBOX_ARGS[@]}" \
         "$IMAGE" \
         pi --append-system-prompt "$SANDBOX_NOTE" "${PI_ARGS[@]}"
 EXIT_CODE=$?
